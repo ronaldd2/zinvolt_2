@@ -1,0 +1,15 @@
+{
+  "domain": "zinvolt_2",
+  "name": "Zinvolt 2",
+  "categories": ["energy.solar_batteries"],
+  "codeowners": [],
+  "config_flow": true,
+  "connectivity": ["cloud"],
+  "documentation": "https://github.com/ronaldd2/zinvolt_2",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "loggers": ["zinvolt"],
+  "quality_scale": "bronze",
+  "requirements": ["zinvolt==1.1.1"],
+  "version": "0.1.0"
+}
