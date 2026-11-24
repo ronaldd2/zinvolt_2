@@ -302,7 +302,20 @@ class BatteryFeaturesTest(unittest.IsolatedAsyncioTestCase):
                 self.client, "battery", self.state, "max_charge_power", 100
             )
         self.client.set_smart_mode.reset_mock()
-        await self.observe(179)
+        await self.observe(180)
+        self.client.set_smart_mode.assert_not_awaited()
+        self.assertIsNone(self.control.pause_until)
+        self.assertEqual(self.control.charge_max, 0)
+        self.state.current_power.power_socket_output = None
+        await self.observe(210)
+        self.assertIsNone(self.control.pause_until)
+        self.state.current_power.power_socket_output = 25
+        await self.observe(240)
+        self.assertIsNone(self.control.pause_until)
+        self.state.current_power.power_socket_output = 0
+        await self.observe(270)
+        self.assertEqual(self.control.pause_until, self.now.timestamp() + 450)
+        await self.observe(449)
         self.client.set_smart_mode.assert_not_awaited()
         await self.control.async_set_limit(
             self.client, "battery", self.state, "charge_limit", 700
@@ -311,14 +324,16 @@ class BatteryFeaturesTest(unittest.IsolatedAsyncioTestCase):
             self.client, "battery", self.state, "discharge_limit", 500
         )
         self.client.set_max_charge_power.assert_awaited_with("battery", 0)
-        await self.observe(180)
+        await self.observe(450)
         self.client.set_smart_mode.assert_awaited_once_with("battery", SmartMode.SELF_USE)
         self.client.set_max_charge_power.assert_awaited_with("battery", 700)
         self.client.set_max_output.assert_awaited_with("battery", 500)
         self.state.smart_mode = "SELF_USE"
-        await self.observe(210)
+        self.state.current_power.power_socket_output = -500
+        await self.observe(480)
         self.client.set_smart_mode.assert_awaited_with("battery", SmartMode.CHARGED)
         self.client.set_max_charge_power.assert_awaited_with("battery", 0)
+        self.assertIsNone(self.control.pause_until)
 
     async def test_api_error_does_not_persist_a_successful_mode_change(self):
         from zinvolt.exceptions import ZinvoltError
@@ -369,11 +384,44 @@ class BatteryFeaturesTest(unittest.IsolatedAsyncioTestCase):
         restored = self.control_module.BatteryControl(None, "entry", "battery")
         await restored.async_load()
         self.assertEqual(restored.local_mode, "discharge_only")
-        self.assertEqual(restored.pause_until, self.now.timestamp() + 180)
+        self.assertIsNone(restored.pause_until)
+        self.assertEqual(restored.charge_max, 0)
         self.client.set_smart_mode.reset_mock()
         self.state.smart_mode = "CHARGED"
-        await restored.async_observe(self.client, "battery", self.state, self.now + timedelta(seconds=90))
+        await restored.async_observe(
+            self.client, "battery", self.state, self.now + timedelta(seconds=300)
+        )
         self.client.set_smart_mode.assert_not_awaited()
+        self.state.current_power.power_socket_output = 0
+        await restored.async_observe(
+            self.client, "battery", self.state, self.now + timedelta(seconds=330)
+        )
+        self.assertEqual(restored.pause_until, self.now.timestamp() + 510)
+        await restored.async_save()
+        countdown = self.control_module.BatteryControl(None, "entry", "battery")
+        await countdown.async_load()
+        await countdown.async_observe(
+            self.client, "battery", self.state, self.now + timedelta(seconds=509)
+        )
+        self.client.set_smart_mode.assert_not_awaited()
+        await countdown.async_observe(
+            self.client, "battery", self.state, self.now + timedelta(seconds=510)
+        )
+        self.client.set_smart_mode.assert_awaited_once_with("battery", SmartMode.SELF_USE)
+
+    async def test_legacy_pause_waits_for_measured_zero_after_upgrade(self):
+        data = self.control._data()
+        data.pop("zero_power_pause")
+        data["local_mode"] = "discharge_only"
+        data["pause_until"] = self.now.timestamp() - 1
+        await self.control.store.async_save(data)
+        await self.control.async_load()
+        self.assertIsNone(self.control.pause_until)
+        self.state.smart_mode = "CHARGED"
+        self.state.current_power.power_socket_output = -500
+        await self.observe()
+        self.client.set_smart_mode.assert_not_awaited()
+        self.assertEqual(self.control.charge_max, 0)
 
 
 if __name__ == "__main__":

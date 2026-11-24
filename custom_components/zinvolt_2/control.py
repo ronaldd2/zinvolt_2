@@ -34,7 +34,8 @@ class BatteryControl:
         self.discharge_limit = 2000
         self.requested_output: int | None = None
         self.local_mode: str | None = None
-        self.pause_until = 0.0
+        # None waits for measured zero; 0 means no pause.
+        self.pause_until: float | None = 0.0
         self._last_api_mode: str | None = None
         self._save_scheduled = False
 
@@ -46,6 +47,9 @@ class BatteryControl:
             self.requested_output = data["requested_output"]
             self.local_mode = data["local_mode"]
             self.pause_until = data["pause_until"]
+            if self.pause_until and not data.get("zero_power_pause", False):
+                # Legacy deadlines started when Inactive was commanded, not measured.
+                self.pause_until = None
             self.energy = EnergyEstimate(**data["energy"])
 
     def _data(self) -> dict[str, Any]:
@@ -58,6 +62,7 @@ class BatteryControl:
             "requested_output": self.requested_output,
             "local_mode": self.local_mode,
             "pause_until": self.pause_until,
+            "zero_power_pause": True,
             "energy": energy,
         }
 
@@ -86,7 +91,7 @@ class BatteryControl:
     def charge_max(self) -> int:
         """Keep the live charge control at zero while inactive or paused."""
         if self.local_mode == "inactive" or (
-            self.local_mode == "discharge_only" and self.pause_until
+            self.local_mode == "discharge_only" and self.pause_until != 0
         ):
             return 0
         return self.charge_limit
@@ -131,13 +136,16 @@ class BatteryControl:
                 client, battery_id, state, SmartMode.CHARGED, charge_blocked=True
             )
         elif self.local_mode == "discharge_only":
-            if self.pause_until:
-                if now.timestamp() >= self.pause_until:
+            if self.pause_until != 0:
+                if self.pause_until is None:
+                    if power == 0:
+                        self.pause_until = now.timestamp() + 180
+                elif now.timestamp() >= self.pause_until:
                     await self._async_apply_mode(
                         client, battery_id, state, SmartMode.SELF_USE
                     )
                     self.pause_until = 0
-                elif state.smart_mode != SmartMode.CHARGED:
+                if self.pause_until != 0 and state.smart_mode != SmartMode.CHARGED:
                     await self._async_apply_mode(
                         client,
                         battery_id,
@@ -149,7 +157,7 @@ class BatteryControl:
                 await self._async_apply_mode(
                     client, battery_id, state, SmartMode.CHARGED, charge_blocked=True
                 )
-                self.pause_until = now.timestamp() + 180
+                self.pause_until = None
             elif state.smart_mode != SmartMode.SELF_USE:
                 await self._async_apply_mode(
                     client, battery_id, state, SmartMode.SELF_USE
