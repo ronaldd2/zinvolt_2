@@ -50,9 +50,15 @@ class ZinvoltBatteryMode(ZinvoltEntity, SelectEntity):
     @override
     def current_option(self) -> str | None:
         """Return the current battery mode."""
-        return self.coordinator.control.local_mode or MODE_MAP.get(
-            self.coordinator.data.battery.smart_mode
-        )
+        if self.coordinator.control.local_mode:
+            return self.coordinator.control.local_mode
+        state = self.coordinator.data.battery
+        if (
+            state.smart_mode == SmartMode.CHARGED
+            and state.global_settings.maximum_charge_power == 0
+        ):
+            return "inactive"
+        return MODE_MAP.get(state.smart_mode)
 
     @override
     async def async_select_option(self, option: str) -> None:

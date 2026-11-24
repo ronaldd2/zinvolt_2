@@ -19,7 +19,7 @@ from .const import DOMAIN
 from .energy import EnergyEstimate
 
 _LOGGER = logging.getLogger(__name__)
-LOCAL_MODES = ("charge_only", "discharge_only")
+LOCAL_MODES = ("charge_only", "discharge_only", "inactive")
 
 
 class BatteryControl:
@@ -82,6 +82,15 @@ class BatteryControl:
         settings = state.global_settings
         return 2000 if settings.max_output_unlocked else settings.max_output_limit
 
+    @property
+    def charge_max(self) -> int:
+        """Keep the live charge control at zero while inactive or paused."""
+        if self.local_mode == "inactive" or (
+            self.local_mode == "discharge_only" and self.pause_until
+        ):
+            return 0
+        return self.charge_limit
+
     async def async_observe(
         self,
         client: ObservedZinvoltClient,
@@ -111,22 +120,40 @@ class BatteryControl:
             target_output = min(self.requested_output, output_limit)
         if settings.max_output != target_output:
             await client.set_max_output(battery_id, target_output)
-        if settings.maximum_charge_power > self.charge_limit:
-            await client.set_max_charge_power(battery_id, self.charge_limit)
+        if settings.maximum_charge_power > self.charge_max:
+            await client.set_max_charge_power(battery_id, self.charge_max)
         if self.local_mode == "charge_only" and state.smart_mode != SmartMode.SELF_USE:
-            await client.set_smart_mode(battery_id, SmartMode.SELF_USE)
+            await self._async_apply_mode(
+                client, battery_id, state, SmartMode.SELF_USE, output_blocked=True
+            )
+        elif self.local_mode == "inactive" and state.smart_mode != SmartMode.CHARGED:
+            await self._async_apply_mode(
+                client, battery_id, state, SmartMode.CHARGED, charge_blocked=True
+            )
         elif self.local_mode == "discharge_only":
             if self.pause_until:
                 if now.timestamp() >= self.pause_until:
-                    await client.set_smart_mode(battery_id, SmartMode.SELF_USE)
+                    await self._async_apply_mode(
+                        client, battery_id, state, SmartMode.SELF_USE
+                    )
                     self.pause_until = 0
-                elif state.smart_mode != SmartMode.FEED:
-                    await client.set_smart_mode(battery_id, SmartMode.FEED)
+                elif state.smart_mode != SmartMode.CHARGED:
+                    await self._async_apply_mode(
+                        client,
+                        battery_id,
+                        state,
+                        SmartMode.CHARGED,
+                        charge_blocked=True,
+                    )
             elif power is not None and power < 0:
-                await client.set_smart_mode(battery_id, SmartMode.FEED)
+                await self._async_apply_mode(
+                    client, battery_id, state, SmartMode.CHARGED, charge_blocked=True
+                )
                 self.pause_until = now.timestamp() + 180
             elif state.smart_mode != SmartMode.SELF_USE:
-                await client.set_smart_mode(battery_id, SmartMode.SELF_USE)
+                await self._async_apply_mode(
+                    client, battery_id, state, SmartMode.SELF_USE
+                )
         self.schedule_save()
 
     async def async_set_limit(
@@ -145,8 +172,9 @@ class BatteryControl:
         limit = int(value)
         try:
             if key == "charge_limit":
-                if state.global_settings.maximum_charge_power > limit:
-                    await client.set_max_charge_power(battery_id, limit)
+                target = 0 if self.charge_max == 0 else limit
+                if state.global_settings.maximum_charge_power > target:
+                    await client.set_max_charge_power(battery_id, target)
                 self.charge_limit = limit
             else:
                 target = 0 if self.local_mode == "charge_only" else limit
@@ -171,7 +199,7 @@ class BatteryControl:
         if key not in ("max_charge_power", "max_output"):
             raise ServiceValidationError(f"Unknown power control: {key}")
         maximum = (
-            self.charge_limit
+            self.charge_max
             if key == "max_charge_power"
             else min(self.discharge_limit, self.output_max(state))
         )
@@ -195,36 +223,56 @@ class BatteryControl:
         state: ObservedBatteryState,
         mode: SmartMode | str,
     ) -> None:
-        """Switch local policy, restoring output when leaving charge-only."""
+        """Switch policy and copy configured limits to both live power controls."""
         local_mode = mode if mode in LOCAL_MODES else None
         if local_mode is None and not isinstance(mode, SmartMode):
             raise ServiceValidationError(f"Unsupported mode: {mode}")
-        output = min(
-            self.requested_output
-            if self.requested_output is not None
-            else state.global_settings.max_output,
-            self.discharge_limit,
-            self.output_max(state),
-        )
-        if local_mode == "discharge_only":
-            _LOGGER.warning(
-                "Experimental discharge-only uses FEED, not a verified inactive mode; "
-                "charging can continue between polls or while Home Assistant is offline"
-            )
+        if local_mode == "inactive":
+            api_mode = SmartMode.CHARGED
+        elif local_mode:
+            api_mode = SmartMode.SELF_USE
+        else:
+            api_mode = SmartMode(mode)
         try:
-            if local_mode == "charge_only":
-                await client.set_max_output(battery_id, 0)
-            elif self.local_mode in LOCAL_MODES:
-                await client.set_max_output(battery_id, output)
-            await client.set_smart_mode(
-                battery_id, SmartMode.SELF_USE if local_mode else mode
+            await self._async_apply_mode(
+                client,
+                battery_id,
+                state,
+                api_mode,
+                charge_blocked=local_mode == "inactive",
+                output_blocked=local_mode == "charge_only",
             )
         except ZinvoltError as err:
             raise HomeAssistantError(f"Unable to switch battery mode: {err}") from err
         self.local_mode = local_mode
-        self.requested_output = output
         self.pause_until = 0
         await self.async_save()
+
+    async def _async_apply_mode(
+        self,
+        client: ObservedZinvoltClient,
+        battery_id: str,
+        state: ObservedBatteryState,
+        mode: SmartMode,
+        *,
+        charge_blocked: bool = False,
+        output_blocked: bool = False,
+    ) -> None:
+        """Apply zero overrides before switching; restore other powers afterwards."""
+        charge = 0 if charge_blocked else self.charge_limit
+        output = (
+            0 if output_blocked else min(self.discharge_limit, self.output_max(state))
+        )
+        if charge == 0:
+            await client.set_max_charge_power(battery_id, 0)
+        if output == 0:
+            await client.set_max_output(battery_id, 0)
+        await client.set_smart_mode(battery_id, mode)
+        if output:
+            await client.set_max_output(battery_id, output)
+        if charge:
+            await client.set_max_charge_power(battery_id, charge)
+        self.requested_output = min(self.discharge_limit, self.output_max(state))
 
     @staticmethod
     def _validate_power(value: float, maximum: int) -> None:

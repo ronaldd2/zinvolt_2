@@ -147,7 +147,7 @@ class ZinvoltBatteryStateNumber(ZinvoltEntity, NumberEntity):
                 self.coordinator.control.output_max(self.coordinator.data.battery),
             )
         if self.entity_description.key == "max_charge_power":
-            return self.coordinator.control.charge_limit
+            return self.coordinator.control.charge_max
         if self.entity_description.max_fn is None:
             return super().native_max_value
         return self.entity_description.max_fn(self.coordinator.data)

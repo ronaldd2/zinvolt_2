@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from zinvolt.models import CurrentPower, GlobalSettings, OnlineStatus, SmartMode
 
@@ -128,6 +128,103 @@ class BatteryFeaturesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.smart_mode, "IDLE")
         self.assertEqual(state.current_power.power_socket_output, 500)
 
+    async def test_inactive_restores_updated_limits_when_leaving(self):
+        self.control.charge_limit = 600
+        self.control.discharge_limit = 400
+        await self.control.async_set_mode(
+            self.client, "battery", self.state, "inactive"
+        )
+        self.client.set_smart_mode.assert_awaited_with("battery", SmartMode.CHARGED)
+        self.client.set_max_charge_power.assert_awaited_with("battery", 0)
+        self.assertEqual(self.control.local_mode, "inactive")
+        restored = self.control_module.BatteryControl(None, "entry", "battery")
+        await restored.async_load()
+        self.assertEqual(restored.local_mode, "inactive")
+        self.assertEqual(restored.charge_max, 0)
+        with self.assertRaises(ServiceValidationError):
+            await self.control.async_set_power(
+                self.client, "battery", self.state, "max_charge_power", 100
+            )
+        self.state.smart_mode = "CHARGED"
+        self.state.global_settings.maximum_charge_power = 0
+        self.state.global_settings.max_output = 0
+        await self.control.async_set_limit(
+            self.client, "battery", self.state, "charge_limit", 700
+        )
+        await self.control.async_set_limit(
+            self.client, "battery", self.state, "discharge_limit", 500
+        )
+        self.client.set_max_charge_power.assert_awaited_with("battery", 0)
+        await self.control.async_set_mode(
+            self.client, "battery", self.state, SmartMode.SELF_USE
+        )
+        self.client.set_max_charge_power.assert_awaited_with("battery", 700)
+        self.client.set_max_output.assert_awaited_with("battery", 500)
+
+    async def test_native_mode_switch_copies_both_limits_even_without_local_mode(self):
+        self.control.charge_limit = 600
+        self.control.discharge_limit = 400
+        self.control.requested_output = 0
+        self.state.global_settings.maximum_charge_power = 0
+        self.state.global_settings.max_output = 0
+        await self.control.async_set_mode(
+            self.client, "battery", self.state, SmartMode.CHARGED
+        )
+        self.client.set_max_charge_power.assert_awaited_once_with("battery", 600)
+        self.client.set_max_output.assert_awaited_once_with("battery", 400)
+        self.client.set_smart_mode.assert_awaited_once_with("battery", SmartMode.CHARGED)
+        self.assertIsNone(self.control.local_mode)
+
+    async def test_inactive_sets_zero_before_selecting_charged(self):
+        requests = Mock()
+        requests.attach_mock(self.client.set_max_charge_power, "charge")
+        requests.attach_mock(self.client.set_max_output, "output")
+        requests.attach_mock(self.client.set_smart_mode, "mode")
+        await self.control.async_set_mode(
+            self.client, "battery", self.state, "inactive"
+        )
+        self.assertEqual(requests.mock_calls, [
+            call.charge("battery", 0),
+            call.mode("battery", SmartMode.CHARGED),
+            call.output("battery", 800),
+        ])
+
+    async def test_selector_distinguishes_app_inactive_from_fast_charge(self):
+        class Entity:
+            def __init__(self, coordinator):
+                self.coordinator = coordinator
+
+        modules = {
+            "homeassistant.components": module("homeassistant.components"),
+            "homeassistant.components.select": module(
+                "homeassistant.components.select", SelectEntity=object
+            ),
+            "homeassistant.helpers.entity_platform": module(
+                "homeassistant.helpers.entity_platform",
+                AddConfigEntryEntitiesCallback=object,
+            ),
+            "custom_components.zinvolt_2.coordinator": module(
+                "custom_components.zinvolt_2.coordinator",
+                ZinvoltConfigEntry=object, ZinvoltDeviceCoordinator=object,
+            ),
+            "custom_components.zinvolt_2.entity": module(
+                "custom_components.zinvolt_2.entity", ZinvoltEntity=Entity
+            ),
+        }
+        with patch.dict(sys.modules, modules):
+            select = importlib.import_module("custom_components.zinvolt_2.select")
+            coordinator = SimpleNamespace(
+                control=self.control, data=SimpleNamespace(battery=self.state)
+            )
+            entity = select.ZinvoltBatteryMode(coordinator)
+            self.state.smart_mode = "CHARGED"
+            self.state.global_settings.maximum_charge_power = 0
+            self.assertEqual(entity.current_option, "inactive")
+            self.state.global_settings.maximum_charge_power = 600
+            self.assertEqual(entity.current_option, "fast_charge")
+            self.control.local_mode = "discharge_only"
+            self.assertEqual(entity.current_option, "discharge_only")
+
     async def test_energy_direction_midnight_and_restart(self):
         energy = self.energy_module.EnergyEstimate()
         zone = timezone(timedelta(hours=1))
@@ -187,21 +284,41 @@ class BatteryFeaturesTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.control.local_mode)
 
     async def test_discharge_only_pauses_and_retries_after_three_minutes(self):
+        self.control.charge_limit = 600
+        self.control.discharge_limit = 400
         await self.observe()
-        with self.assertLogs(level="WARNING"):
-            await self.control.async_set_mode(self.client, "battery", self.state, "discharge_only")
+        await self.control.async_set_mode(
+            self.client, "battery", self.state, "discharge_only"
+        )
         self.state.current_power.power_socket_output = -500
         await self.observe()
-        self.client.set_smart_mode.assert_awaited_with("battery", SmartMode.FEED)
-        self.state.smart_mode = "FEED"
+        self.client.set_smart_mode.assert_awaited_with("battery", SmartMode.CHARGED)
+        self.client.set_max_charge_power.assert_awaited_with("battery", 0)
+        self.state.smart_mode = "CHARGED"
+        self.state.global_settings.maximum_charge_power = 0
+        self.state.global_settings.max_output = 400
+        with self.assertRaises(ServiceValidationError):
+            await self.control.async_set_power(
+                self.client, "battery", self.state, "max_charge_power", 100
+            )
         self.client.set_smart_mode.reset_mock()
         await self.observe(179)
         self.client.set_smart_mode.assert_not_awaited()
+        await self.control.async_set_limit(
+            self.client, "battery", self.state, "charge_limit", 700
+        )
+        await self.control.async_set_limit(
+            self.client, "battery", self.state, "discharge_limit", 500
+        )
+        self.client.set_max_charge_power.assert_awaited_with("battery", 0)
         await self.observe(180)
         self.client.set_smart_mode.assert_awaited_once_with("battery", SmartMode.SELF_USE)
+        self.client.set_max_charge_power.assert_awaited_with("battery", 700)
+        self.client.set_max_output.assert_awaited_with("battery", 500)
         self.state.smart_mode = "SELF_USE"
         await self.observe(210)
-        self.client.set_smart_mode.assert_awaited_with("battery", SmartMode.FEED)
+        self.client.set_smart_mode.assert_awaited_with("battery", SmartMode.CHARGED)
+        self.client.set_max_charge_power.assert_awaited_with("battery", 0)
 
     async def test_api_error_does_not_persist_a_successful_mode_change(self):
         from zinvolt.exceptions import ZinvoltError
@@ -229,8 +346,9 @@ class BatteryFeaturesTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_raising_limit_does_not_raise_discharge_only_output(self):
         await self.observe()
-        with self.assertLogs(level="WARNING"):
-            await self.control.async_set_mode(self.client, "battery", self.state, "discharge_only")
+        await self.control.async_set_mode(
+            self.client, "battery", self.state, "discharge_only"
+        )
         await self.control.async_set_limit(self.client, "battery", self.state, "discharge_limit", 400)
         self.state.global_settings.max_output = 400
         self.client.set_max_output.reset_mock()
@@ -253,7 +371,7 @@ class BatteryFeaturesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.local_mode, "discharge_only")
         self.assertEqual(restored.pause_until, self.now.timestamp() + 180)
         self.client.set_smart_mode.reset_mock()
-        self.state.smart_mode = "FEED"
+        self.state.smart_mode = "CHARGED"
         await restored.async_observe(self.client, "battery", self.state, self.now + timedelta(seconds=90))
         self.client.set_smart_mode.assert_not_awaited()
 

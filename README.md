@@ -39,26 +39,41 @@ are rejected. App-side changes above a ceiling are corrected on the next poll.
 The existing Maximum output number now reports the actual configured output,
 including on unlocked devices.
 
-- **Charge only:** sets Maximum output to zero and selects SELF_USE. The previous
-  output is restored (subject to the ceiling) when leaving the local mode.
-- **Discharge only (experimental):** selects SELF_USE. If the API reports negative
-  socket output (charging), it switches to FEED for three minutes, then retries
-  SELF_USE. Charging detected on a subsequent poll starts another pause.
+Every mode selection in HA copies both configured limits to the live charge
+and discharge power settings, bounded by the hardware maximum. This deliberately
+replaces any lower live setpoints left by the previous mode or the app.
+Mode-specific zero overrides take precedence:
 
-FEED is labelled "Connected solar panels" by the original integration. It is
-**not a verified idle mode and may not prevent charging**, especially with solar.
+- **Inactive:** selects CHARGED with Maximum charge power set to zero, matching
+  the reported app behavior. The configured charge limit itself is preserved.
+- **Charge only:** sets Maximum output to zero and selects SELF_USE, with charge
+  power copied from the configured charge limit.
+- **Discharge only (experimental):** selects SELF_USE. If the API reports negative
+  socket output (charging), it switches to Inactive (CHARGED with zero charge
+  power) for three minutes, then retries SELF_USE. The retry also restores both
+  configured limits, including changes made during the pause. Charging detected
+  on a subsequent poll starts another pause.
+
+Leaving Inactive restores the configured charge power instead of leaving it
+at zero. Selecting Fast charge still uses CHARGED, but with the configured charge
+power, so it remains distinct from Inactive. The live charge control is limited
+to zero while Inactive or during a discharge-only pause; the separate configured
+limit can still be edited for the next mode switch.
+
 This is best-effort polling control, not a safety interlock. It cannot enforce
 limits while HA is stopped, offline, or unable to reach the API. Local modes and
 limits survive restarts; native mode changes in the app can be overridden while
 a local mode is selected. Choose a native mode in HA to stop the local policy.
 
-## Finding the app's inactive mode
+## API mode diagnostics
 
 The pinned `zinvolt==1.1.1` client defines DYNAMIC, CHARGED, PERFORMANCE, DEFAULT,
 FEED, CUSTOM, and SELF_USE, but **no IDLE**. This integration preserves the raw
-API string, even when it is unknown to that enum, instead of guessing its meaning.
+API string, even when it is unknown to that enum. Inactive is implemented using
+CHARGED plus zero charge power, not a new API enum value. The mode selector also
+recognizes that combination when it is reported by the app.
 
-1. Select a native mode in HA (for example Self-use) to leave either local mode.
+1. Select a native mode in HA (for example Self-use) to leave any local mode.
 2. Select inactive in the Zinvolt app.
 3. Wait for the next poll (normally 30 seconds) and inspect **API smart mode**
    in the battery's diagnostic entities.
@@ -73,7 +88,6 @@ logger:
 
 Only the mode string is logged by this message, not account credentials or the
 full API response. Downloaded integration diagnostics also contain the mode.
-The app's actual inactive value still needs to be observed on a real battery.
 
 ## Troubleshooting
 
