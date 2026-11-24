@@ -6,6 +6,11 @@ It uses the original `zinvolt` Python client and is not an official integration.
 
 ## Installation
 
+For HACS, add `https://github.com/ronaldd2/zinvolt_2` as a custom repository
+with type **Integration**, then download **Zinvolt 2** and restart Home Assistant.
+
+For manual installation:
+
 Copy `custom_components/zinvolt_2` into your Home Assistant
 `config/custom_components/zinvolt_2` directory and restart Home Assistant.
 Add **Zinvolt 2** under Settings > Devices & services and sign in with your
