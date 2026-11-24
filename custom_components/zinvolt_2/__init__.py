@@ -1,8 +1,7 @@
-"""The Zinvolt integration."""
+"""Zinvolt setup, modified for raw-mode observation and persistent controls."""
 
 import asyncio
 
-from zinvolt import ZinvoltClient
 from zinvolt.exceptions import ZinvoltAuthenticationError, ZinvoltError
 
 from homeassistant.const import CONF_ACCESS_TOKEN, Platform
@@ -11,6 +10,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from .client import ObservedZinvoltClient
 from .const import DOMAIN
 from .coordinator import ZinvoltConfigEntry, ZinvoltDeviceCoordinator
 
@@ -25,7 +25,7 @@ _PLATFORMS: list[Platform] = [
 async def async_setup_entry(hass: HomeAssistant, entry: ZinvoltConfigEntry) -> None:
     """Set up Zinvolt from a config entry."""
     session = async_get_clientsession(hass)
-    client = ZinvoltClient(entry.data[CONF_ACCESS_TOKEN], session=session)
+    client = ObservedZinvoltClient(entry.data[CONF_ACCESS_TOKEN], session=session)
 
     try:
         batteries = await client.get_batteries()
@@ -63,3 +63,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ZinvoltConfigEntry) -> N
 async def async_unload_entry(hass: HomeAssistant, entry: ZinvoltConfigEntry) -> None:
     """Unload a config entry."""
     await hass.config_entries.async_unload_platforms_or_raise(entry, _PLATFORMS)
+    for coordinator in entry.runtime_data.values():
+        async with coordinator.control_lock:
+            await coordinator.control.async_save()

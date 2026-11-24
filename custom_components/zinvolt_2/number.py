@@ -1,4 +1,4 @@
-"""Number platform for Zinvolt integration."""
+"""Zinvolt number platform, modified to enforce persistent power ceilings."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -35,11 +35,7 @@ NUMBERS: tuple[ZinvoltBatteryStateDescription, ...] = (
         entity_category=EntityCategory.CONFIG,
         device_class=NumberDeviceClass.POWER,
         native_unit_of_measurement=UnitOfPower.WATT,
-        value_fn=lambda state: (
-            2000
-            if state.battery.global_settings.max_output_unlocked
-            else state.battery.global_settings.max_output
-        ),
+        value_fn=lambda state: state.battery.global_settings.max_output,
         set_value_fn=lambda client, battery_id, value: client.set_max_output(
             battery_id, value
         ),
@@ -115,6 +111,15 @@ async def async_setup_entry(
         for description in NUMBERS
         for coordinator in entry.runtime_data.values()
     )
+    async_add_entities(
+        ZinvoltPowerLimit(coordinator, key)
+        for coordinator in entry.runtime_data.values()
+        for key in ("charge_limit", "discharge_limit")
+    )
+    async_add_entities(
+        ZinvoltRetryDelay(coordinator)
+        for coordinator in entry.runtime_data.values()
+    )
 
 
 class ZinvoltBatteryStateNumber(ZinvoltEntity, NumberEntity):
@@ -138,6 +143,15 @@ class ZinvoltBatteryStateNumber(ZinvoltEntity, NumberEntity):
     @override
     def native_max_value(self) -> float:
         """Return the native maximum value."""
+        if self.entity_description.key == "max_output":
+            if self.coordinator.control.local_mode == "charge_only":
+                return 0
+            return min(
+                self.coordinator.control.discharge_limit,
+                self.coordinator.control.output_max(self.coordinator.data.battery),
+            )
+        if self.entity_description.key == "max_charge_power":
+            return self.coordinator.control.charge_max
         if self.entity_description.max_fn is None:
             return super().native_max_value
         return self.entity_description.max_fn(self.coordinator.data)
@@ -151,7 +165,68 @@ class ZinvoltBatteryStateNumber(ZinvoltEntity, NumberEntity):
     @override
     async def async_set_native_value(self, value: float) -> None:
         """Set the state of the sensor."""
+        if self.entity_description.key in ("max_output", "max_charge_power"):
+            await self.coordinator.async_set_power(self.entity_description.key, value)
+            return
         await self.entity_description.set_value_fn(
             self.coordinator.client, self.coordinator.battery.identifier, int(value)
         )
         await self.coordinator.async_request_refresh()
+
+
+class ZinvoltPowerLimit(ZinvoltEntity, NumberEntity):
+    """A persistent ceiling separate from the API's live power setpoint."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_device_class = NumberDeviceClass.POWER
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_native_min_value = 0
+    _attr_native_step = 1
+
+    def __init__(self, coordinator: ZinvoltDeviceCoordinator, key: str) -> None:
+        super().__init__(coordinator)
+        self.key = key
+        self._attr_translation_key = key
+        self._attr_unique_id = f"{coordinator.data.battery.serial_number}.{key}"
+
+    @property
+    def native_value(self) -> float:
+        return (
+            self.coordinator.control.charge_limit
+            if self.key == "charge_limit"
+            else self.coordinator.control.discharge_limit
+        )
+
+    @property
+    def native_max_value(self) -> float:
+        return (
+            2000
+            if self.key == "charge_limit"
+            else self.coordinator.control.output_max(self.coordinator.data.battery)
+        )
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.coordinator.async_set_limit(self.key, value)
+
+
+class ZinvoltRetryDelay(ZinvoltEntity, NumberEntity):
+    """Persistent duration of a discharge-only retry countdown."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_device_class = NumberDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_native_min_value = 1
+    _attr_native_max_value = 60
+    _attr_native_step = 1
+    _attr_translation_key = "retry_delay"
+
+    def __init__(self, coordinator: ZinvoltDeviceCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.data.battery.serial_number}.retry_delay"
+
+    @property
+    def native_value(self) -> float:
+        return self.coordinator.control.retry_delay_minutes
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.coordinator.async_set_retry_delay(value)
