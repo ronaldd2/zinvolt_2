@@ -150,6 +150,12 @@ class ZinvoltDeviceCoordinator(DataUpdateCoordinator[ZinvoltData]):
             },
         )
 
+    async def async_set_retry_delay(self, value: float) -> None:
+        """Set the local retry delay and notify entities without a cloud request."""
+        async with self.control_lock:
+            await self.control.async_set_retry_delay(value)
+        self.async_update_listeners()
+
     async def async_set_limit(self, key: str, value: float) -> None:
         """Set a persistent local cap."""
         async with self.control_lock:

@@ -289,6 +289,24 @@ class PartialUpdatesTest(unittest.IsolatedAsyncioTestCase):
         await limit.async_set_native_value(500)
         coordinator.async_set_limit.assert_awaited_once_with("charge_limit", 500)
 
+    async def test_configuration_setup_exposes_retry_delay_and_routes_changes(self):
+        coordinator = SimpleNamespace(
+            data=SimpleNamespace(battery=SimpleNamespace(serial_number="test")),
+            battery=SimpleNamespace(name="test"),
+            control=SimpleNamespace(retry_delay_minutes=3),
+            async_set_retry_delay=AsyncMock(),
+        )
+        entry = SimpleNamespace(runtime_data={"battery": coordinator})
+        added = []
+        await self.number_module.async_setup_entry(None, entry, added.extend)
+        delay = next(
+            entity for entity in added
+            if isinstance(entity, self.number_module.ZinvoltRetryDelay)
+        )
+        self.assertEqual(delay.native_value, 3)
+        await delay.async_set_native_value(2)
+        coordinator.async_set_retry_delay.assert_awaited_once_with(2)
+
     async def test_energy_and_raw_mode_entities_expose_independent_values(self):
         coordinator = SimpleNamespace(
             data=SimpleNamespace(battery=SimpleNamespace(

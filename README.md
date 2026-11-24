@@ -51,11 +51,13 @@ Mode-specific zero overrides take precedence:
 - **Discharge only (experimental):** selects SELF_USE. If the API reports negative
   socket output (charging), it switches to Inactive (CHARGED with zero charge
   power). It waits for measured socket power to report exactly 0 W, then starts
-  a three-minute countdown before retrying SELF_USE. Missing or nonzero readings
-  do not start the countdown. Both the waiting state and countdown survive
-  reloads. The retry also restores both configured limits, including changes
-  made during the pause. Charging detected on a subsequent poll starts another
-  pause.
+  a countdown before retrying SELF_USE. Configure its duration with the per-battery
+  **Discharge-only retry delay** number under Configuration: 1-60 whole minutes,
+  default 3. This setting is saved across restarts. Changes apply to the next
+  countdown, not an already running countdown. Missing or nonzero readings do
+  not start the countdown. Both the waiting state and countdown survive reloads.
+  The retry also restores both configured limits, including changes made during
+  the pause. Charging detected on a subsequent poll starts another pause.
 
 Leaving Inactive restores the configured charge power instead of leaving it
 at zero. Selecting Fast charge still uses CHARGED, but with the configured charge

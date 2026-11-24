@@ -116,6 +116,10 @@ async def async_setup_entry(
         for coordinator in entry.runtime_data.values()
         for key in ("charge_limit", "discharge_limit")
     )
+    async_add_entities(
+        ZinvoltRetryDelay(coordinator)
+        for coordinator in entry.runtime_data.values()
+    )
 
 
 class ZinvoltBatteryStateNumber(ZinvoltEntity, NumberEntity):
@@ -203,3 +207,26 @@ class ZinvoltPowerLimit(ZinvoltEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         await self.coordinator.async_set_limit(self.key, value)
+
+
+class ZinvoltRetryDelay(ZinvoltEntity, NumberEntity):
+    """Persistent duration of a discharge-only retry countdown."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_device_class = NumberDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_native_min_value = 1
+    _attr_native_max_value = 60
+    _attr_native_step = 1
+    _attr_translation_key = "retry_delay"
+
+    def __init__(self, coordinator: ZinvoltDeviceCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.data.battery.serial_number}.retry_delay"
+
+    @property
+    def native_value(self) -> float:
+        return self.coordinator.control.retry_delay_minutes
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.coordinator.async_set_retry_delay(value)

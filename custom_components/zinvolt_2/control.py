@@ -32,6 +32,7 @@ class BatteryControl:
         self.energy = EnergyEstimate()
         self.charge_limit = 2000
         self.discharge_limit = 2000
+        self.retry_delay_minutes = 3
         self.requested_output: int | None = None
         self.local_mode: str | None = None
         # None waits for measured zero; 0 means no pause.
@@ -44,6 +45,7 @@ class BatteryControl:
         if (data := await self.store.async_load()) is not None:
             self.charge_limit = data["charge_limit"]
             self.discharge_limit = data["discharge_limit"]
+            self.retry_delay_minutes = data.get("retry_delay_minutes", 3)
             self.requested_output = data["requested_output"]
             self.local_mode = data["local_mode"]
             self.pause_until = data["pause_until"]
@@ -59,6 +61,7 @@ class BatteryControl:
         return {
             "charge_limit": self.charge_limit,
             "discharge_limit": self.discharge_limit,
+            "retry_delay_minutes": self.retry_delay_minutes,
             "requested_output": self.requested_output,
             "local_mode": self.local_mode,
             "pause_until": self.pause_until,
@@ -139,7 +142,9 @@ class BatteryControl:
             if self.pause_until != 0:
                 if self.pause_until is None:
                     if power == 0:
-                        self.pause_until = now.timestamp() + 180
+                        self.pause_until = (
+                            now.timestamp() + self.retry_delay_minutes * 60
+                        )
                 elif now.timestamp() >= self.pause_until:
                     await self._async_apply_mode(
                         client, battery_id, state, SmartMode.SELF_USE
@@ -163,6 +168,19 @@ class BatteryControl:
                     client, battery_id, state, SmartMode.SELF_USE
                 )
         self.schedule_save()
+
+    async def async_set_retry_delay(self, value: float) -> None:
+        """Set the delay for future countdowns without changing an active deadline."""
+        if (
+            not math.isfinite(value)
+            or value != int(value)
+            or not 1 <= value <= 60
+        ):
+            raise ServiceValidationError(
+                "Retry delay must be a whole number between 1 and 60 minutes"
+            )
+        self.retry_delay_minutes = int(value)
+        await self.async_save()
 
     async def async_set_limit(
         self,

@@ -71,6 +71,9 @@
       }
     },
     "number": {
+      "retry_delay": {
+        "name": "Discharge-only retry delay"
+      },
       "charge_limit": {
         "name": "Configured charge power limit"
       },

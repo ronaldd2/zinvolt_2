@@ -412,16 +412,59 @@ class BatteryFeaturesTest(unittest.IsolatedAsyncioTestCase):
     async def test_legacy_pause_waits_for_measured_zero_after_upgrade(self):
         data = self.control._data()
         data.pop("zero_power_pause")
+        data.pop("retry_delay_minutes", None)
         data["local_mode"] = "discharge_only"
         data["pause_until"] = self.now.timestamp() - 1
         await self.control.store.async_save(data)
         await self.control.async_load()
         self.assertIsNone(self.control.pause_until)
+        self.assertEqual(self.control.retry_delay_minutes, 3)
         self.state.smart_mode = "CHARGED"
         self.state.current_power.power_socket_output = -500
         await self.observe()
         self.client.set_smart_mode.assert_not_awaited()
         self.assertEqual(self.control.charge_max, 0)
+
+    async def test_retry_delay_persists_and_only_changes_future_countdowns(self):
+        self.control.local_mode = "discharge_only"
+        self.state.current_power.power_socket_output = -500
+        await self.observe()
+        await self.control.async_set_retry_delay(2)
+        self.state.smart_mode = "CHARGED"
+        self.state.current_power.power_socket_output = 0
+        await self.observe(30)
+        self.assertEqual(self.control.pause_until, self.now.timestamp() + 150)
+        await self.control.async_set_retry_delay(5)
+        restored = self.control_module.BatteryControl(None, "entry", "battery")
+        await restored.async_load()
+        self.assertEqual(restored.retry_delay_minutes, 5)
+        self.assertEqual(restored.pause_until, self.now.timestamp() + 150)
+        self.control = restored
+        self.client.set_smart_mode.reset_mock()
+        await self.observe(149)
+        self.client.set_smart_mode.assert_not_awaited()
+        await self.observe(150)
+        self.client.set_smart_mode.assert_awaited_once_with("battery", SmartMode.SELF_USE)
+        self.state.smart_mode = "SELF_USE"
+        self.state.current_power.power_socket_output = -500
+        await self.observe(180)
+        self.state.smart_mode = "CHARGED"
+        self.state.current_power.power_socket_output = 0
+        await self.observe(210)
+        self.assertEqual(self.control.pause_until, self.now.timestamp() + 510)
+
+    async def test_retry_delay_validates_whole_minute_bounds(self):
+        for invalid in (0, 61, -1, 1.5, float("nan"), float("inf")):
+            with self.assertRaises(ServiceValidationError):
+                await self.control.async_set_retry_delay(invalid)
+        self.assertEqual(self.control.retry_delay_minutes, 3)
+        self.assertEqual(MemoryStore.data, {})
+        for valid in (1, 60):
+            await self.control.async_set_retry_delay(valid)
+            self.assertEqual(self.control.retry_delay_minutes, valid)
+        self.client.set_smart_mode.assert_not_awaited()
+        self.client.set_max_charge_power.assert_not_awaited()
+        self.client.set_max_output.assert_not_awaited()
 
 
 if __name__ == "__main__":
