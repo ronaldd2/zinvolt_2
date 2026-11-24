@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 
 class ZinvoltError(Exception):
@@ -25,7 +25,8 @@ class Base:
         return cls
 
     def __init__(self, *args, **kwargs):
-        pass
+        if args:
+            self.coordinator = args[0]
 
 
 class UpdateFailed(Exception):
@@ -43,6 +44,10 @@ class Description:
     translation_key: str = ""
     entity_category: object = None
     device_class: object = None
+    state_class: object = None
+    native_unit_of_measurement: object = None
+    native_min_value: float = 0
+    native_max_value: float = 100
 
 
 def module(name, **attributes):
@@ -59,6 +64,17 @@ class PartialUpdatesTest(unittest.IsolatedAsyncioTestCase):
         package.__path__ = [str(root / "custom_components" / "zinvolt_2")]
         modules = {
             "custom_components.zinvolt_2": package,
+            "custom_components.zinvolt_2.client": module(
+                "custom_components.zinvolt_2.client",
+                ObservedBatteryState=object,
+                ObservedZinvoltClient=object,
+            ),
+            "custom_components.zinvolt_2.control": module(
+                "custom_components.zinvolt_2.control",
+                BatteryControl=lambda *args: SimpleNamespace(
+                    async_observe=AsyncMock(), energy=SimpleNamespace(update=Mock())
+                ),
+            ),
             "zinvolt": module("zinvolt", ZinvoltClient=object),
             "zinvolt.exceptions": module(
                 "zinvolt.exceptions",
@@ -72,6 +88,7 @@ class PartialUpdatesTest(unittest.IsolatedAsyncioTestCase):
                 Unit=object,
                 UnitType=SimpleNamespace(BATTERY=object()),
                 OnlineStatus=SimpleNamespace(ONLINE=object()),
+                SmartMode=str,
             ),
             "homeassistant": module("homeassistant"),
             "homeassistant.config_entries": module(
@@ -82,7 +99,11 @@ class PartialUpdatesTest(unittest.IsolatedAsyncioTestCase):
             ),
             "homeassistant.const": module(
                 "homeassistant.const",
-                EntityCategory=SimpleNamespace(DIAGNOSTIC=object()),
+                EntityCategory=SimpleNamespace(DIAGNOSTIC=object(), CONFIG=object()),
+                PERCENTAGE="%",
+                UnitOfPower=SimpleNamespace(WATT="W"),
+                UnitOfTime=SimpleNamespace(MINUTES="min"),
+                UnitOfEnergy=SimpleNamespace(KILO_WATT_HOUR="kWh"),
             ),
             "homeassistant.components": module("homeassistant.components"),
             "homeassistant.components.binary_sensor": module(
@@ -93,16 +114,42 @@ class PartialUpdatesTest(unittest.IsolatedAsyncioTestCase):
                 BinarySensorEntity=Base,
                 BinarySensorEntityDescription=Description,
             ),
+            "homeassistant.components.sensor": module(
+                "homeassistant.components.sensor",
+                SensorDeviceClass=SimpleNamespace(
+                    BATTERY="battery", POWER="power", ENERGY="energy"
+                ),
+                SensorStateClass=SimpleNamespace(
+                    MEASUREMENT="measurement", TOTAL_INCREASING="total_increasing"
+                ),
+                SensorEntity=Base,
+                SensorEntityDescription=Description,
+            ),
+            "homeassistant.components.number": module(
+                "homeassistant.components.number",
+                NumberDeviceClass=SimpleNamespace(POWER="power", DURATION="duration"),
+                NumberEntity=Base,
+                NumberEntityDescription=Description,
+            ),
             "homeassistant.exceptions": module(
                 "homeassistant.exceptions", ConfigEntryAuthFailed=ConfigEntryAuthFailed
             ),
             "homeassistant.helpers": module("homeassistant.helpers"),
+            "homeassistant.util": module("homeassistant.util"),
+            "homeassistant.util.dt": module(
+                "homeassistant.util.dt",
+                utcnow=Mock(),
+                get_default_time_zone=Mock(),
+            ),
             "homeassistant.helpers.device_registry": module(
                 "homeassistant.helpers.device_registry", DeviceInfo=dict
             ),
             "homeassistant.helpers.entity_platform": module(
                 "homeassistant.helpers.entity_platform",
                 AddConfigEntryEntitiesCallback=object,
+            ),
+            "homeassistant.helpers.event": module(
+                "homeassistant.helpers.event", async_track_time_change=Mock()
             ),
             "homeassistant.helpers.update_coordinator": module(
                 "homeassistant.helpers.update_coordinator",
@@ -119,6 +166,8 @@ class PartialUpdatesTest(unittest.IsolatedAsyncioTestCase):
         cls.binary_sensor_module = importlib.import_module(
             "custom_components.zinvolt_2.binary_sensor"
         )
+        cls.sensor_module = importlib.import_module("custom_components.zinvolt_2.sensor")
+        cls.number_module = importlib.import_module("custom_components.zinvolt_2.number")
 
     @classmethod
     def tearDownClass(cls):
@@ -126,15 +175,18 @@ class PartialUpdatesTest(unittest.IsolatedAsyncioTestCase):
         sys.modules.pop("custom_components.zinvolt_2.binary_sensor", None)
         sys.modules.pop("custom_components.zinvolt_2.entity", None)
         sys.modules.pop("custom_components.zinvolt_2.const", None)
+        sys.modules.pop("custom_components.zinvolt_2.sensor", None)
+        sys.modules.pop("custom_components.zinvolt_2.number", None)
         cls.module_patch.stop()
 
     def make_coordinator(self, unit_fetch):
         client = SimpleNamespace(
-            get_battery_status=AsyncMock(return_value="main status"),
+            get_observed_battery_status=AsyncMock(return_value="main status"),
             get_battery_unit=AsyncMock(side_effect=unit_fetch),
         )
         coordinator = self.coordinator_module.ZinvoltDeviceCoordinator(
-            None, None, client, SimpleNamespace(identifier="battery")
+            None, SimpleNamespace(entry_id="entry"), client,
+            SimpleNamespace(identifier="battery")
         )
         coordinator.battery_units = {"unit-1": object(), "unit-2": object()}
         return coordinator, client
@@ -172,7 +224,7 @@ class PartialUpdatesTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_status_failure_is_not_reported_as_success(self):
         coordinator, client = self.make_coordinator(None)
-        client.get_battery_status.side_effect = ZinvoltError("status unavailable")
+        client.get_observed_battery_status.side_effect = ZinvoltError("status unavailable")
         with self.assertLogs(level="WARNING"), self.assertRaises(UpdateFailed):
             await coordinator._async_update_data()
         client.get_battery_unit.assert_not_awaited()
@@ -209,6 +261,57 @@ class PartialUpdatesTest(unittest.IsolatedAsyncioTestCase):
             listeners[0]()
             listeners[0]()
         self.assertEqual(added, ["main", ("unit-1", "voltage")])
+
+    async def test_power_entities_use_caps_and_actual_unlocked_output(self):
+        state = SimpleNamespace(
+            serial_number="test",
+            global_settings=SimpleNamespace(max_output=700, max_output_unlocked=True),
+        )
+        control = SimpleNamespace(
+            charge_limit=600, discharge_limit=400, local_mode=None,
+            output_max=lambda state: 2000,
+        )
+        coordinator = SimpleNamespace(
+            data=SimpleNamespace(battery=state),
+            battery=SimpleNamespace(name="test"), control=control,
+            async_set_power=AsyncMock(), async_set_limit=AsyncMock(),
+        )
+        entity = self.number_module.ZinvoltBatteryStateNumber(
+            coordinator, self.number_module.NUMBERS[0]
+        )
+        self.assertEqual(entity.native_value, 700)
+        self.assertEqual(entity.native_max_value, 400)
+        await entity.async_set_native_value(300)
+        coordinator.async_set_power.assert_awaited_once_with("max_output", 300)
+        control.local_mode = "charge_only"
+        self.assertEqual(entity.native_max_value, 0)
+        limit = self.number_module.ZinvoltPowerLimit(coordinator, "charge_limit")
+        await limit.async_set_native_value(500)
+        coordinator.async_set_limit.assert_awaited_once_with("charge_limit", 500)
+
+    async def test_energy_and_raw_mode_entities_expose_independent_values(self):
+        coordinator = SimpleNamespace(
+            data=SimpleNamespace(battery=SimpleNamespace(
+                serial_number="test", smart_mode="IDLE"
+            )),
+            battery=SimpleNamespace(name="test"),
+            control=SimpleNamespace(energy=SimpleNamespace(
+                charged_total=1.2, charged_daily=.2,
+                discharged_total=2.3, discharged_daily=.3,
+            )),
+            last_update_success=True,
+        )
+        values = [
+            self.sensor_module.ZinvoltEnergySensor(coordinator, direction, daily).native_value
+            for direction in ("charged", "discharged")
+            for daily in (False, True)
+        ]
+        self.assertEqual(values, [1.2, .2, 2.3, .3])
+        sensor = self.sensor_module.ZinvoltRawModeSensor(coordinator)
+        self.assertTrue(sensor.available)
+        self.assertEqual(sensor.native_value, "IDLE")
+        coordinator.last_update_success = False
+        self.assertFalse(sensor.available)
 
 
 if __name__ == "__main__":

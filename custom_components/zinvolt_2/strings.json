@@ -71,6 +71,12 @@
       }
     },
     "number": {
+      "charge_limit": {
+        "name": "Configured charge power limit"
+      },
+      "discharge_limit": {
+        "name": "Configured discharge power limit"
+      },
       "lower_threshold": {
         "name": "Minimum charge level"
       },
@@ -91,12 +97,31 @@
       "battery_mode": {
         "name": "Mode",
         "state": {
+          "charge_only": "Charge only",
+          "discharge_only": "Discharge only (experimental)",
           "connected_solar_panels": "Connected solar panels",
           "dynamic": "Dynamic",
           "fast_charge": "Fast charge",
           "fast_discharge": "Fast discharge",
           "self_use": "Self-use"
         }
+      }
+    },
+    "sensor": {
+      "energy_charged_total": {
+        "name": "Approximate energy charged total"
+      },
+      "energy_charged_daily": {
+        "name": "Approximate energy charged today"
+      },
+      "energy_discharged_total": {
+        "name": "Approximate energy discharged total"
+      },
+      "energy_discharged_daily": {
+        "name": "Approximate energy discharged today"
+      },
+      "api_smart_mode": {
+        "name": "API smart mode"
       }
     }
   },

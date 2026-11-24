@@ -1,4 +1,4 @@
-"""Select platform for Zinvolt integration."""
+"""Zinvolt select platform, modified to expose synthetic local modes."""
 
 from typing import override
 
@@ -8,10 +8,11 @@ from homeassistant.components.select import SelectEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from .control import LOCAL_MODES
 from .coordinator import ZinvoltConfigEntry, ZinvoltDeviceCoordinator
 from .entity import ZinvoltEntity
 
-MODE_MAP = {
+MODE_MAP: dict[str, str] = {
     SmartMode.DYNAMIC: "dynamic",
     SmartMode.SELF_USE: "self_use",
     SmartMode.PERFORMANCE: "fast_discharge",
@@ -37,7 +38,7 @@ async def async_setup_entry(
 class ZinvoltBatteryMode(ZinvoltEntity, SelectEntity):
     """Zinvolt select."""
 
-    _attr_options = list(HA_TO_MODE.keys())
+    _attr_options = [*HA_TO_MODE, *LOCAL_MODES]
     _attr_translation_key = "battery_mode"
 
     def __init__(self, coordinator: ZinvoltDeviceCoordinator) -> None:
@@ -49,12 +50,13 @@ class ZinvoltBatteryMode(ZinvoltEntity, SelectEntity):
     @override
     def current_option(self) -> str | None:
         """Return the current battery mode."""
-        return MODE_MAP.get(self.coordinator.data.battery.smart_mode)
+        return self.coordinator.control.local_mode or MODE_MAP.get(
+            self.coordinator.data.battery.smart_mode
+        )
 
     @override
     async def async_select_option(self, option: str) -> None:
         """Set battery mode."""
-        await self.coordinator.client.set_smart_mode(
-            self.coordinator.battery.identifier, HA_TO_MODE[option]
+        await self.coordinator.async_set_mode(
+            HA_TO_MODE[option] if option in HA_TO_MODE else option
         )
-        await self.coordinator.async_request_refresh()
